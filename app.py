@@ -2,17 +2,28 @@
 
 Permette di cercare una carta tramite l'autocompletamento di Scryfall,
 scegliere edizione, lingua e quantità, vedere l'anteprima in tempo reale
-(entrambe le facce per le carte DFC) e costruire una coda di stampa
-esportabile in JSON per i passaggi successivi (download PNG e upscaling).
+e costruire una coda di stampa. Per le carte a doppio lato (DFC) viene
+scaricata ed elaborata solo la faccia frontale.
+
+Il pulsante "Elabora Carte per la Stampa" scarica i PNG da Scryfall,
+li ricampiona a 600 DPI (2835x3960 px) e genera un file ZIP scaricabile.
 
 Avvio: ``streamlit run app.py``
 """
 
 import json
+import re
+import zipfile
+from io import BytesIO
 
 import streamlit as st
 
-from scryfall_api import autocomplete, get_card_printings
+from image_processor import process_image_bytes
+from scryfall_api import autocomplete, download_image, get_card_printings
+
+DFC_WARNING = (
+    "⚠️ Carta a doppio lato: verrà scaricata e stampata solo la faccia frontale."
+)
 
 st.set_page_config(
     page_title="MTG Proxy Builder",
@@ -61,6 +72,54 @@ def default_lang_index(languages: list[str]) -> int:
         if preferred in languages:
             return languages.index(preferred)
     return 0
+
+
+def safe_filename(text: str) -> str:
+    """Converte un testo in un nome di file sicuro."""
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", text).strip("_")
+
+
+def process_queue_to_zip(queue: list[dict]) -> bytes | None:
+    """Scarica, ricampiona a 600 DPI e comprime in ZIP le carte in coda.
+
+    Ogni copia richiesta (quantità) viene inclusa come file separato.
+    Restituisce i byte dello ZIP, oppure ``None`` se nessuna carta è stata
+    elaborata con successo.
+    """
+    zip_buffer = BytesIO()
+    processed_count = 0
+    progress = st.progress(0.0, text="Elaborazione in corso...")
+
+    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        for index, item in enumerate(queue):
+            label = f"{item['name']} [{item['set_code']} #{item['collector_number']}]"
+            progress.progress(index / len(queue), text=f"Elaborazione: {label}")
+
+            png_bytes = download_image(item["image_png"])
+            if not png_bytes:
+                st.error(f"Download fallito per {label}: carta saltata.")
+                continue
+
+            try:
+                processed_png = process_image_bytes(png_bytes)
+            except Exception:
+                st.error(f"Elaborazione fallita per {label}: carta saltata.")
+                continue
+
+            base_name = safe_filename(
+                f"{item['name']}_{item['set_code']}_"
+                f"{item['collector_number']}_{item['lang']}"
+            )
+            for copy in range(1, item["quantity"] + 1):
+                archive.writestr(f"{index + 1:02d}_{base_name}_copy{copy}.png",
+                                 processed_png)
+            processed_count += 1
+
+    progress.progress(1.0, text="Elaborazione completata.")
+
+    if processed_count == 0:
+        return None
+    return zip_buffer.getvalue()
 
 
 st.title("MTG Proxy Builder - Card Selector")
@@ -151,7 +210,6 @@ with col_left:
                         "image_png": selected_printing["image_png"],
                         "image_normal": selected_printing["image_normal"],
                         "is_dfc": selected_printing["is_dfc"],
-                        "faces": selected_printing["faces"],
                     }
                 )
                 st.success(f"Aggiunto: {selected_name} x{int(quantity)}")
@@ -164,25 +222,16 @@ with col_right:
 
     if selected_printing is None:
         st.caption("Cerca e seleziona una carta per vedere l'anteprima.")
-    elif selected_printing["is_dfc"] and selected_printing["faces"]:
-        face_cols = st.columns(len(selected_printing["faces"]))
-        captions = ["Fronte", "Retro"]
-        for i, (face_col, face_url) in enumerate(
-            zip(face_cols, selected_printing["faces"])
-        ):
-            with face_col:
-                st.image(
-                    face_url,
-                    caption=captions[i] if i < len(captions) else f"Faccia {i + 1}",
-                    width="stretch",
-                )
     elif selected_printing["image_normal"]:
+        if selected_printing["is_dfc"]:
+            st.warning(DFC_WARNING)
         st.image(
             selected_printing["image_normal"],
             caption=(
                 f"{selected_printing['set_name']} "
                 f"(#{selected_printing['collector_number']}) "
                 f"[{selected_printing['lang']}]"
+                + (" — solo fronte" if selected_printing["is_dfc"] else "")
             ),
             width=340,
         )
@@ -204,7 +253,7 @@ else:
 
     for index, item in enumerate(st.session_state.queue):
         row = st.columns([3, 3, 1, 1, 1, 1])
-        row[0].write(item["name"])
+        row[0].write(("⚠️ " if item["is_dfc"] else "") + item["name"])
         row[1].write(item["set_name"])
         row[2].write(f"#{item['collector_number']}")
         row[3].write(item["lang"])
@@ -218,18 +267,40 @@ else:
         f"{len(st.session_state.queue)} voci in coda, {total_cards} carte totali."
     )
 
+    if any(item["is_dfc"] for item in st.session_state.queue):
+        st.warning(DFC_WARNING)
+
     queue_json = json.dumps(st.session_state.queue, indent=2, ensure_ascii=False)
 
-    action_cols = st.columns([1, 1, 4])
-    action_cols[0].download_button(
+    action_cols = st.columns([2, 1, 1, 3])
+    if action_cols[0].button("🚀 Elabora Carte per la Stampa", type="primary"):
+        zip_bytes = process_queue_to_zip(st.session_state.queue)
+        if zip_bytes is None:
+            st.error("Nessuna carta elaborata: controlla gli errori qui sopra.")
+            st.session_state.pop("processed_zip", None)
+        else:
+            st.session_state.processed_zip = zip_bytes
+            st.success("Elaborazione completata: carte ricampionate a 600 DPI.")
+
+    action_cols[1].download_button(
         "Scarica coda (JSON)",
         data=queue_json,
         file_name="print_queue.json",
         mime="application/json",
     )
-    if action_cols[1].button("Svuota coda"):
+    if action_cols[2].button("Svuota coda"):
         st.session_state.queue = []
+        st.session_state.pop("processed_zip", None)
         st.rerun()
+
+    if st.session_state.get("processed_zip"):
+        st.download_button(
+            "⬇️ Scarica ZIP delle carte elaborate (600 DPI)",
+            data=st.session_state.processed_zip,
+            file_name="proxy_cards_600dpi.zip",
+            mime="application/zip",
+            type="primary",
+        )
 
     with st.expander("Anteprima JSON della coda"):
         st.code(queue_json, language="json")

@@ -53,6 +53,30 @@ def _rate_limited_get(url: str, params: dict | None = None) -> dict | None:
         return None
 
 
+def download_image(url: str) -> bytes | None:
+    """Scarica un'immagine (es. PNG di Scryfall) rispettando il rate limit.
+
+    Restituisce i byte dell'immagine oppure ``None`` in caso di errore.
+    """
+    global _last_request_time
+
+    if not url:
+        return None
+
+    elapsed = time.monotonic() - _last_request_time
+    if elapsed < REQUEST_DELAY_SECONDS:
+        time.sleep(REQUEST_DELAY_SECONDS - elapsed)
+
+    try:
+        response = _session.get(url, timeout=REQUEST_TIMEOUT_SECONDS)
+        _last_request_time = time.monotonic()
+        response.raise_for_status()
+        return response.content
+    except requests.RequestException:
+        _last_request_time = time.monotonic()
+        return None
+
+
 def autocomplete(query: str) -> list[str]:
     """Restituisce i nomi di carte che corrispondono alla query.
 
@@ -80,15 +104,11 @@ def _extract_printing(card: dict) -> dict:
         isinstance(face.get("image_uris"), dict) for face in card_faces
     )
 
+    # Per le carte DFC viene usata sempre e solo la Faccia A (fronte,
+    # card_faces[0]): la Faccia B non viene mai richiesta né scaricata.
     if is_dfc:
-        faces = [
-            face["image_uris"].get("png") or face["image_uris"].get("normal")
-            for face in card_faces
-        ]
-        faces = [url for url in faces if url]
         image_uris = card_faces[0].get("image_uris", {})
     else:
-        faces = []
         image_uris = card.get("image_uris") or {}
 
     return {
@@ -99,7 +119,6 @@ def _extract_printing(card: dict) -> dict:
         "image_png": image_uris.get("png"),
         "image_normal": image_uris.get("normal"),
         "is_dfc": is_dfc,
-        "faces": faces,
     }
 
 
