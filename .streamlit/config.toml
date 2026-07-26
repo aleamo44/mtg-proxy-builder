@@ -1,0 +1,15 @@
+# Configurazione del server Streamlit per il MTG Proxy Builder.
+#
+# XSRF e CORS vengono disattivati perché, quando l'app è raggiunta via web
+# attraverso un proxy/host remoto (origine diversa da localhost), i browser
+# bloccano il download dei file generati da st.download_button (lo ZIP delle
+# carte elaborate) dall'endpoint media di Streamlit.
+
+[server]
+enableXsrfProtection = false
+enableCORS = false
+# Le code di stampa a 600 DPI possono produrre payload molto grandi.
+maxMessageSize = 1000
+
+[browser]
+gatherUsageStats = false
