@@ -77,10 +77,73 @@ def download_image(url: str) -> bytes | None:
         return None
 
 
+def _printed_name(card: dict) -> str | None:
+    """Restituisce il nome stampato (localizzato) di una carta, se presente.
+
+    Per le carte multi-faccia il nome stampato è dentro ``card_faces``.
+    """
+    printed = card.get("printed_name")
+    if printed:
+        return printed
+
+    faces = card.get("card_faces") or []
+    face_names = [face.get("printed_name") for face in faces]
+    if face_names and all(face_names):
+        return " // ".join(face_names)
+    return None
+
+
+def _multilingual_name_search(query: str, max_results: int = 20) -> list[str]:
+    """Cerca nomi di carte in qualsiasi lingua tramite la ricerca globale.
+
+    Interroga ``/cards/search`` con ``q=lang:any "<query>"`` ed estrae sia i
+    nomi inglesi (``name``) sia i nomi stampati nelle altre lingue
+    (``printed_name``), senza duplicati.
+    """
+    data = _rate_limited_get(
+        f"{API_BASE_URL}/cards/search",
+        params={
+            "q": f'lang:any "{query}"',
+            "include_multilingual": "true",
+            "unique": "prints",
+        },
+    )
+    if not data or data.get("object") == "error":
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+    query_lower = query.lower()
+
+    for card in data.get("data", []):
+        if not isinstance(card, dict):
+            continue
+        candidates = []
+        printed = _printed_name(card)
+        # Il nome stampato che corrisponde alla query digitata viene proposto
+        # per primo, seguito dal nome inglese di riferimento.
+        if printed and query_lower in printed.lower():
+            candidates.append(printed)
+        if card.get("name"):
+            candidates.append(card["name"])
+        for candidate in candidates:
+            if candidate not in seen:
+                seen.add(candidate)
+                names.append(candidate)
+        if len(names) >= max_results:
+            break
+
+    return names[:max_results]
+
+
 def autocomplete(query: str) -> list[str]:
     """Restituisce i nomi di carte che corrispondono alla query.
 
-    Interroga l'endpoint ``/cards/autocomplete`` di Scryfall.
+    Interroga prima l'endpoint ``/cards/autocomplete`` di Scryfall (solo nomi
+    inglesi). Se non produce risultati e la query ha almeno 3 caratteri,
+    effettua un fallback sulla ricerca globale ``lang:any`` per trovare le
+    carte anche tramite i nomi stampati in altre lingue (es. italiano).
+
     In caso di errore o di query vuota restituisce una lista vuota.
     """
     query = (query or "").strip()
@@ -88,11 +151,15 @@ def autocomplete(query: str) -> list[str]:
         return []
 
     data = _rate_limited_get(f"{API_BASE_URL}/cards/autocomplete", params={"q": query})
-    if not data or data.get("object") == "error":
-        return []
+    if data and data.get("object") != "error":
+        names = [name for name in data.get("data", []) if isinstance(name, str)]
+        if names:
+            return names
 
-    names = data.get("data", [])
-    return [name for name in names if isinstance(name, str)]
+    if len(query) >= 3:
+        return _multilingual_name_search(query)
+
+    return []
 
 
 def _extract_printing(card: dict) -> dict:
@@ -122,11 +189,54 @@ def _extract_printing(card: dict) -> dict:
     }
 
 
+def _resolve_oracle_id(card_name: str) -> str | None:
+    """Risolve l'``oracle_id`` di una carta a partire dal suo nome.
+
+    Prova prima con il nome esatto inglese (``/cards/named?exact=``); se non
+    trovato (es. nome stampato in italiano o altra lingua), effettua una
+    ricerca globale ``lang:any`` e cerca la carta il cui nome stampato o
+    inglese corrisponde esattamente al nome richiesto.
+    """
+    named = _rate_limited_get(
+        f"{API_BASE_URL}/cards/named", params={"exact": card_name}
+    )
+    if named and named.get("oracle_id"):
+        return named["oracle_id"]
+
+    data = _rate_limited_get(
+        f"{API_BASE_URL}/cards/search",
+        params={
+            "q": f'lang:any "{card_name}"',
+            "include_multilingual": "true",
+            "unique": "prints",
+        },
+    )
+    if not data or data.get("object") == "error":
+        return None
+
+    name_lower = card_name.lower()
+    fallback_id: str | None = None
+    for card in data.get("data", []):
+        if not isinstance(card, dict) or not card.get("oracle_id"):
+            continue
+        printed = _printed_name(card)
+        if (printed and printed.lower() == name_lower) or (
+            card.get("name", "").lower() == name_lower
+        ):
+            return card["oracle_id"]
+        if fallback_id is None:
+            fallback_id = card["oracle_id"]
+
+    # Nessuna corrispondenza esatta: usa il primo risultato della ricerca.
+    return fallback_id
+
+
 def get_card_printings(card_name: str) -> list[dict]:
     """Restituisce tutte le stampe di una carta, incluse quelle multilingua.
 
-    Cerca prima la carta per nome esatto per ricavarne l'``oracle_id``, poi
-    interroga ``/cards/search`` con ``q=oracleid:...``, ``unique=prints`` e
+    Risolve prima l'``oracle_id`` della carta (funziona anche con i nomi
+    stampati in lingue diverse dall'inglese, es. italiano), poi interroga
+    ``/cards/search`` con ``q=oracleid:...``, ``unique=prints`` e
     ``include_multilingual=true``, seguendo la paginazione.
 
     In caso di carta non trovata o errore restituisce una lista vuota.
@@ -135,13 +245,9 @@ def get_card_printings(card_name: str) -> list[dict]:
     if not card_name:
         return []
 
-    # Ricava l'oracle_id dal nome esatto: la ricerca per oracleid include
-    # anche le stampe con nomi localizzati, a differenza di q=exact:"...".
-    named = _rate_limited_get(
-        f"{API_BASE_URL}/cards/named", params={"exact": card_name}
-    )
-    if named and named.get("oracle_id"):
-        query = f'oracleid:{named["oracle_id"]}'
+    oracle_id = _resolve_oracle_id(card_name)
+    if oracle_id:
+        query = f"oracleid:{oracle_id}"
     else:
         # Fallback: ricerca diretta per nome esatto.
         query = f'!"{card_name}"'
