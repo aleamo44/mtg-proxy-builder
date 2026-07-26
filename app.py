@@ -1,4 +1,4 @@
-"""Interfaccia web principale del MTG Professional Proxy Builder.
+"""Interfaccia web principale del MTG Proxy Builder.
 
 Permette di cercare una carta tramite l'autocompletamento di Scryfall,
 scegliere edizione, lingua e quantità, vedere l'anteprima in tempo reale
@@ -15,7 +15,7 @@ import streamlit as st
 from scryfall_api import autocomplete, get_card_printings
 
 st.set_page_config(
-    page_title="MTG Professional Proxy Builder",
+    page_title="MTG Proxy Builder",
     page_icon="🃏",
     layout="wide",
 )
@@ -63,7 +63,7 @@ def default_lang_index(languages: list[str]) -> int:
     return 0
 
 
-st.title("MTG Professional Proxy Builder - Card Selector")
+st.title("MTG Proxy Builder - Card Selector")
 
 col_left, col_right = st.columns([1, 1], gap="large")
 
