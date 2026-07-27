@@ -215,6 +215,14 @@ with col_left:
             )
 
             if st.button("Aggiungi alla Coda di Stampa", type="primary"):
+                # Default del miglioramento avanzato: ON solo per le scansioni
+                # a bassa risoluzione mantenute in lingua non inglese; OFF per
+                # le carte ad alta risoluzione o se si è passati alla
+                # versione EN. Resta modificabile dal checkbox in coda.
+                default_enhance = (
+                    selected_printing["is_low_res"]
+                    and selected_printing["lang"] != "en"
+                )
                 add_to_queue(
                     {
                         "name": selected_name,
@@ -227,9 +235,7 @@ with col_left:
                         "image_normal": selected_printing["image_normal"],
                         "is_dfc": selected_printing["is_dfc"],
                         "is_low_res": selected_printing["is_low_res"],
-                        # Miglioramento avanzato sempre OFF di default:
-                        # l'operatore lo attiva manualmente dalla coda.
-                        "enhance": False,
+                        "enhance": default_enhance,
                     }
                 )
                 st.success(f"Aggiunto: {selected_name} x{int(quantity)}")
@@ -286,10 +292,16 @@ else:
             if item["is_dfc"]:
                 st.warning(DFC_WARNING)
 
+            # Chiave legata all'identità della carta (non all'indice), così lo
+            # stato del checkbox non scivola su un'altra voce dopo una rimozione.
+            item_key = (
+                f"{item['name']}_{item['set_code']}_"
+                f"{item['collector_number']}_{item['lang']}"
+            )
             item["enhance"] = st.checkbox(
                 "✨ Miglioramento Avanzato (Denoise & Sharpening)",
                 value=item.get("enhance", False),
-                key=f"enhance_{index}",
+                key=f"enhance_{item_key}",
             )
 
             btn_cols = st.columns([1, 1, 4])
