@@ -12,6 +12,7 @@ spaziatura configurabile) pronto per il download e la stampa.
 Avvio: ``streamlit run app.py``
 """
 
+import hmac
 import json
 
 import streamlit as st
@@ -29,6 +30,86 @@ st.set_page_config(
     page_icon="🃏",
     layout="wide",
 )
+
+
+# ---------------------------------------------------------------------------
+# Autenticazione basata sui Secrets di Streamlit (st.secrets).
+# Tutta la logica dell'app (ricerca, download, Super-Resolution, PDF) viene
+# eseguita SOLO dopo un login riuscito: in caso contrario st.stop()
+# interrompe lo script prima di qualsiasi elaborazione.
+# ---------------------------------------------------------------------------
+def _load_auth_config() -> dict | None:
+    """Legge la configurazione di autenticazione da ``st.secrets``.
+
+    Restituisce ``None`` se i secrets non sono configurati o incompleti,
+    senza mai far trapelare eccezioni o valori nel front-end.
+    """
+    try:
+        auth = st.secrets["auth"]
+        password = str(auth.get("app_password", "")).strip()
+        allowed_emails = [
+            str(email).strip().lower()
+            for email in auth.get("allowed_emails", [])
+            if str(email).strip()
+        ]
+    except Exception:
+        return None
+    if not password:
+        return None
+    return {"password": password, "allowed_emails": allowed_emails}
+
+
+def require_authentication() -> None:
+    """Blocca l'app finché l'utente non completa il login.
+
+    - Se i secrets non sono configurati, mostra un errore pulito e si ferma.
+    - Verifica email (se è configurata una lista di autorizzate) e password
+      (confronto in tempo costante con ``hmac.compare_digest``).
+    """
+    if st.session_state.get("authenticated"):
+        with st.sidebar:
+            st.caption(f"Connesso come {st.session_state.get('auth_user', '')}")
+            if st.button("Esci"):
+                st.session_state.pop("authenticated", None)
+                st.session_state.pop("auth_user", None)
+                st.rerun()
+        return
+
+    st.title("🔒 MTG Proxy Builder")
+
+    auth_config = _load_auth_config()
+    if auth_config is None:
+        st.error(
+            "Autenticazione non configurata: imposta la sezione `[auth]` con "
+            "`app_password` nei Secrets di Streamlit (in locale crea "
+            "`.streamlit/secrets.toml` partendo da "
+            "`.streamlit/secrets.toml.example`; su Streamlit Cloud usa la "
+            "sezione *Secrets* delle impostazioni dell'app)."
+        )
+        st.stop()
+
+    with st.form("login_form"):
+        email = st.text_input("Email").strip().lower()
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Accedi", type="primary")
+
+    if submitted:
+        email_ok = (
+            not auth_config["allowed_emails"]
+            or email in auth_config["allowed_emails"]
+        )
+        password_ok = hmac.compare_digest(password, auth_config["password"])
+        if email_ok and password_ok:
+            st.session_state.authenticated = True
+            st.session_state.auth_user = email
+            st.rerun()
+        else:
+            st.error("Credenziali non valide.")
+
+    st.stop()
+
+
+require_authentication()
 
 
 # ---------------------------------------------------------------------------
