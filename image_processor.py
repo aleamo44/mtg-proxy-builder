@@ -52,29 +52,40 @@ def upscale_image(image: Image.Image) -> Image.Image:
 
 
 def enhance_image(pil_image: Image.Image) -> Image.Image:
-    """Miglioramento avanzato: denoise bilaterale + unsharp masking (OpenCV).
+    """Miglioramento avanzato: CLAHE (spazio LAB) + unsharp masking (OpenCV).
 
-    Applica ``cv2.bilateralFilter`` per rimuovere il rumore/artefatti JPEG
-    preservando i bordi, quindi una maschera di contrasto (unsharp masking)
-    per definire i bordi di testi e illustrazione. L'eventuale canale alfa
-    (angoli trasparenti della carta) viene preservato.
+    Pipeline:
+    1. Conversione da PIL a NumPy BGR per OpenCV.
+    2. Passaggio allo spazio colore LAB per isolare il canale L (luminanza).
+    3. CLAHE (clipLimit=2.0, tileGridSize=8x8) sul solo canale L, per
+       aumentare il contrasto del testo e pulire il fondo senza alterare
+       i colori originali.
+    4. Riconversione in BGR e unsharp masking per affilare i contorni.
+    5. Riconversione finale in PIL RGB.
+
+    L'eventuale canale alfa (angoli trasparenti della carta) viene
+    preservato riapplicandolo al risultato, così l'impaginazione su
+    foglio bianco non mostra angoli neri.
     """
-    alpha = None
-    if pil_image.mode == "RGBA":
-        alpha = pil_image.getchannel("A")
-        rgb_image = pil_image.convert("RGB")
-    else:
-        rgb_image = pil_image.convert("RGB")
+    alpha = pil_image.getchannel("A") if pil_image.mode == "RGBA" else None
 
-    pixels = np.asarray(rgb_image)
+    # 1. PIL -> NumPy BGR.
+    bgr = cv2.cvtColor(np.asarray(pil_image.convert("RGB")), cv2.COLOR_RGB2BGR)
 
-    denoised = cv2.bilateralFilter(pixels, d=9, sigmaColor=75, sigmaSpace=75)
+    # 2-3. Spazio LAB: CLAHE sul solo canale di luminanza.
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l_channel = clahe.apply(l_channel)
+    lab = cv2.merge((l_channel, a_channel, b_channel))
 
-    # Unsharp masking: originale + (originale - versione sfocata).
-    blurred = cv2.GaussianBlur(denoised, (0, 0), sigmaX=2.0)
-    sharpened = cv2.addWeighted(denoised, 1.5, blurred, -0.5, 0)
+    # 4. Ritorno in BGR e unsharp masking sui contorni.
+    image = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    gaussian = cv2.GaussianBlur(image, (0, 0), sigmaX=2.0)
+    sharpened = cv2.addWeighted(image, 1.5, gaussian, -0.5, 0)
 
-    result = Image.fromarray(sharpened, mode="RGB")
+    # 5. BGR -> PIL RGB.
+    result = Image.fromarray(cv2.cvtColor(sharpened, cv2.COLOR_BGR2RGB))
     if alpha is not None:
         result = result.convert("RGBA")
         result.putalpha(alpha)
