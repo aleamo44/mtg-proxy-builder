@@ -175,6 +175,20 @@ def _best_image_url(image_uris: dict) -> str | None:
     return None
 
 
+def _is_low_res(card: dict, image_uris: dict) -> bool:
+    """Determina se la scansione disponibile è a bassa risoluzione.
+
+    ``True`` quando la sorgente è sotto i 600px di larghezza, ovvero quando:
+    - Scryfall segnala la scansione come ``lowres``/``placeholder``
+      (``image_status``), oppure
+    - è disponibile solo la versione ``normal`` (JPEG compresso, 488px),
+      senza ``png`` né ``large``.
+    """
+    if card.get("image_status") in ("lowres", "placeholder"):
+        return True
+    return not image_uris.get("png") and not image_uris.get("large")
+
+
 def _extract_printing(card: dict) -> dict:
     """Converte un oggetto carta Scryfall nel dizionario di stampa richiesto."""
     card_faces = card.get("card_faces") or []
@@ -199,6 +213,7 @@ def _extract_printing(card: dict) -> dict:
         "image_png": _best_image_url(image_uris),
         "image_normal": image_uris.get("normal"),
         "is_dfc": is_dfc,
+        "is_low_res": _is_low_res(card, image_uris),
     }
 
 

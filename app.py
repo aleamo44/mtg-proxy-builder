@@ -93,7 +93,9 @@ def process_queue_to_pdf(queue: list[dict], spacing_mm: float) -> bytes | None:
             continue
 
         try:
-            processed_png = process_image_bytes(png_bytes)
+            processed_png = process_image_bytes(
+                png_bytes, enhance=item.get("enhance", False)
+            )
         except Exception:
             st.error(f"Elaborazione fallita per {label}: carta saltata.")
             continue
@@ -165,15 +167,32 @@ with col_left:
             )
 
             available_langs = sorted(editions[selected_key]["by_lang"].keys())
+            lang_widget_key = f"lang_select_{selected_name}_{selected_key}"
+            # Applica un eventuale cambio lingua richiesto dal pulsante
+            # "Passa alla versione EN" PRIMA di istanziare il selectbox
+            # (Streamlit vieta di modificarne lo stato dopo).
+            if st.session_state.pop("pending_lang_switch", None) == lang_widget_key:
+                st.session_state[lang_widget_key] = "en"
             selected_lang = st.selectbox(
                 "Lingua",
                 options=available_langs,
                 index=default_lang_index(available_langs),
                 format_func=str.upper,
-                key=f"lang_select_{selected_name}_{selected_key}",
+                key=lang_widget_key,
             )
 
             selected_printing = editions[selected_key]["by_lang"][selected_lang]
+
+            if selected_printing["is_low_res"]:
+                st.warning(
+                    "⚠️ La scansione per questa versione è a bassa risoluzione. "
+                    "La stampa potrebbe risultare sgranata."
+                )
+                en_version = editions[selected_key]["by_lang"].get("en")
+                if selected_lang != "en" and en_version is not None:
+                    if st.button("🇬🇧 Passa alla versione EN ad Alta Definizione"):
+                        st.session_state.pending_lang_switch = lang_widget_key
+                        st.rerun()
 
             # Se l'utente cambia la selezione, l'anteprima torna a mostrare
             # la carta selezionata invece di quella scelta dalla coda.
@@ -207,6 +226,10 @@ with col_left:
                         "image_png": selected_printing["image_png"],
                         "image_normal": selected_printing["image_normal"],
                         "is_dfc": selected_printing["is_dfc"],
+                        "is_low_res": selected_printing["is_low_res"],
+                        # Miglioramento avanzato sempre OFF di default:
+                        # l'operatore lo attiva manualmente dalla coda.
+                        "enhance": False,
                     }
                 )
                 st.success(f"Aggiunto: {selected_name} x{int(quantity)}")
@@ -225,6 +248,11 @@ with col_right:
     elif preview["image_normal"]:
         if preview["is_dfc"]:
             st.warning(DFC_WARNING)
+        if preview.get("is_low_res"):
+            st.warning(
+                "⚠️ La scansione per questa versione è a bassa risoluzione. "
+                "La stampa potrebbe risultare sgranata."
+            )
         caption = (
             f"{preview['set_name']} (#{preview['collector_number']}) "
             f"[{preview['lang'].upper()}]"
@@ -257,6 +285,12 @@ else:
             )
             if item["is_dfc"]:
                 st.warning(DFC_WARNING)
+
+            item["enhance"] = st.checkbox(
+                "✨ Miglioramento Avanzato (Denoise & Sharpening)",
+                value=item.get("enhance", False),
+                key=f"enhance_{index}",
+            )
 
             btn_cols = st.columns([1, 1, 4])
             if btn_cols[0].button(
