@@ -11,9 +11,11 @@ l'immagine mantiene le proporzioni e la struttura originali.
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 
 import cv2
 import numpy as np
+import requests
 from PIL import Image, ImageFilter
 
 # 63 x 88 mm a 600 DPI.
@@ -25,6 +27,59 @@ TARGET_HEIGHT = 3960
 UNSHARP_RADIUS = 1.2
 UNSHARP_PERCENT = 60
 UNSHARP_THRESHOLD = 2
+
+# Modello FSRCNN x2 per la Super-Resolution nativa di OpenCV (~38 KB).
+# NB: il repository EDSR_Tensorflow non ospita i modelli FSRCNN (404);
+# il file ufficiale si trova nel repo gemello FSRCNN_Tensorflow di Saafke.
+FSRCNN_MODEL_URL = (
+    "https://raw.githubusercontent.com/Saafke/FSRCNN_Tensorflow/master/"
+    "models/FSRCNN_x2.pb"
+)
+FSRCNN_MODEL_PATH = Path(__file__).parent / "FSRCNN_x2.pb"
+
+_superres = None
+_superres_failed = False
+
+
+def ensure_superres_model(path: Path = FSRCNN_MODEL_PATH) -> bool:
+    """Scarica il modello FSRCNN_x2.pb se non è già presente nel progetto.
+
+    Restituisce ``True`` se il file è disponibile e plausibile.
+    """
+    if path.is_file() and path.stat().st_size > 10_000:
+        return True
+    try:
+        response = requests.get(FSRCNN_MODEL_URL, timeout=30)
+        response.raise_for_status()
+        if len(response.content) < 10_000:
+            return False
+        path.write_bytes(response.content)
+        return True
+    except requests.RequestException:
+        return False
+
+
+def _get_superres():
+    """Inizializza (una sola volta) il modulo SuperRes di OpenCV con FSRCNN.
+
+    Restituisce l'istanza pronta all'uso oppure ``None`` se il modello non
+    è disponibile o non può essere caricato: in quel caso ``enhance_image``
+    ripiega sul ridimensionamento bicubico.
+    """
+    global _superres, _superres_failed
+    if _superres is not None or _superres_failed:
+        return _superres
+    try:
+        if not hasattr(cv2, "dnn_superres") or not ensure_superres_model():
+            raise RuntimeError("modello FSRCNN non disponibile")
+        sr = cv2.dnn_superres.DnnSuperResImpl_create()
+        sr.readModel(str(FSRCNN_MODEL_PATH))
+        sr.setModel("fsrcnn", 2)
+        _superres = sr
+    except Exception:
+        _superres_failed = True
+        _superres = None
+    return _superres
 
 
 def upscale_image(image: Image.Image) -> Image.Image:
@@ -51,44 +106,53 @@ def upscale_image(image: Image.Image) -> Image.Image:
     )
 
 
-def enhance_image(pil_image: Image.Image) -> Image.Image:
-    """Miglioramento avanzato: CLAHE (spazio LAB) + unsharp masking (OpenCV).
+def _clahe_luminance(bgr: np.ndarray, clip_limit: float) -> np.ndarray:
+    """Applica CLAHE al solo canale L (LAB) di un'immagine BGR."""
+    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+    l_channel, a_channel, b_channel = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
+    l_channel = clahe.apply(l_channel)
+    return cv2.cvtColor(
+        cv2.merge((l_channel, a_channel, b_channel)), cv2.COLOR_LAB2BGR
+    )
 
-    Pipeline:
-    1. Conversione da PIL a NumPy BGR per OpenCV.
-    2. Passaggio allo spazio colore LAB per isolare il canale L (luminanza).
-    3. CLAHE (clipLimit=2.0, tileGridSize=8x8) sul solo canale L, per
-       aumentare il contrasto del testo e pulire il fondo senza alterare
-       i colori originali.
-    4. Riconversione in BGR e unsharp masking per affilare i contorni.
-    5. Riconversione finale in PIL RGB.
+
+def enhance_image(pil_image: Image.Image) -> Image.Image:
+    """Miglioramento avanzato: Super-Resolution FSRCNN x2 + CLAHE leggero.
+
+    Applica l'upscale neurale nativo di OpenCV (``cv2.dnn_superres`` con il
+    modello FSRCNN_x2) sull'immagine BGR, poi rifinisce il contrasto del
+    testo con un CLAHE leggerissimo (clipLimit=1.2) sul canale L (LAB).
+
+    Fallback: se il modello non è disponibile o non si carica, ripiega su
+    un ridimensionamento bicubico x2 con un filtro di affilatura molto
+    leggero.
 
     L'eventuale canale alfa (angoli trasparenti della carta) viene
-    preservato riapplicandolo al risultato, così l'impaginazione su
+    ridimensionato e riapplicato al risultato, così l'impaginazione su
     foglio bianco non mostra angoli neri.
     """
     alpha = pil_image.getchannel("A") if pil_image.mode == "RGBA" else None
-
-    # 1. PIL -> NumPy BGR.
     bgr = cv2.cvtColor(np.asarray(pil_image.convert("RGB")), cv2.COLOR_RGB2BGR)
 
-    # 2-3. Spazio LAB: CLAHE sul solo canale di luminanza.
-    lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
-    l_channel, a_channel, b_channel = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    l_channel = clahe.apply(l_channel)
-    lab = cv2.merge((l_channel, a_channel, b_channel))
+    sr = _get_superres()
+    if sr is not None:
+        upscaled = sr.upsample(bgr)
+        refined = _clahe_luminance(upscaled, clip_limit=1.2)
+        result = Image.fromarray(cv2.cvtColor(refined, cv2.COLOR_BGR2RGB))
+    else:
+        # Fallback: bicubico x2 + affilatura molto leggera.
+        upscaled = cv2.resize(
+            bgr, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC
+        )
+        result = Image.fromarray(cv2.cvtColor(upscaled, cv2.COLOR_BGR2RGB))
+        result = result.filter(
+            ImageFilter.UnsharpMask(radius=1.0, percent=40, threshold=3)
+        )
 
-    # 4. Ritorno in BGR e unsharp masking sui contorni.
-    image = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-    gaussian = cv2.GaussianBlur(image, (0, 0), sigmaX=2.0)
-    sharpened = cv2.addWeighted(image, 1.5, gaussian, -0.5, 0)
-
-    # 5. BGR -> PIL RGB.
-    result = Image.fromarray(cv2.cvtColor(sharpened, cv2.COLOR_BGR2RGB))
     if alpha is not None:
         result = result.convert("RGBA")
-        result.putalpha(alpha)
+        result.putalpha(alpha.resize(result.size, Image.Resampling.LANCZOS))
     return result
 
 
