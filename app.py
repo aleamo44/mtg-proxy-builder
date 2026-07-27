@@ -15,7 +15,7 @@ import streamlit as st
 from scryfall_api import autocomplete, get_card_printings
 
 st.set_page_config(
-    page_title="MTG Proxy Builder",
+    page_title="MTG Proxy Deck Builder",
     page_icon="🃏",
     layout="wide",
 )
@@ -29,7 +29,7 @@ def cached_autocomplete(query: str) -> list[str]:
     return autocomplete(query)
 
 
-@st.cache_data(ttl=3600, show_spinner="Recupero delle stampe da Scryfall...")
+@st.cache_data(ttl=3600, show_spinner="Recupero delle informazioni...")
 def cached_printings(card_name: str) -> list[dict]:
     return get_card_printings(card_name)
 
@@ -63,7 +63,7 @@ def default_lang_index(languages: list[str]) -> int:
     return 0
 
 
-st.title("MTG Proxy Builder - Card Selector")
+st.title("MTG Proxy Deck Builder - Card Selector")
 
 col_left, col_right = st.columns([1, 1], gap="large")
 
@@ -78,7 +78,7 @@ with col_left:
     st.subheader("Selezione carta")
 
     search_query = st.text_input(
-        "Cerca il nome della carta",
+        "Ricerca",
         placeholder="Es. Lightning Bolt, Delver of Secrets...",
         help="Digita almeno 2 caratteri per vedere i suggerimenti.",
     )
@@ -100,7 +100,7 @@ with col_left:
         printings = cached_printings(selected_name)
 
         if not printings:
-            st.warning("Nessuna stampa disponibile per questa carta.")
+            st.warning("Nessuna immagine disponibile per questa carta.")
         else:
             # Raggruppa le stampe per (set, collector number): a ogni gruppo
             # corrispondono le varianti linguistiche della stessa stampa.
@@ -187,7 +187,7 @@ with col_right:
             width=340,
         )
     else:
-        st.warning("Immagine non disponibile per questa stampa.")
+        st.warning("Immagine non disponibile")
 
 # ---------------------------------------------------------------------------
 # Coda di stampa.
