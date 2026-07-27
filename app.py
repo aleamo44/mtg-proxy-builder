@@ -17,6 +17,7 @@ import json
 
 import streamlit as st
 
+from cloud_enhancer import enhance_card_image
 from image_processor import process_image_bytes
 from pdf_generator import generate_a4_pdf
 from scryfall_api import autocomplete, download_image, get_card_printings
@@ -166,7 +167,8 @@ def process_queue_to_pdf(queue: list[dict], spacing_mm: float) -> bytes | None:
 
     for index, item in enumerate(queue):
         label = f"{item['name']} [{item['set_code']} #{item['collector_number']}]"
-        progress.progress(index / len(queue), text=f"Elaborazione: {label}")
+        fraction = index / len(queue)
+        progress.progress(fraction, text=f"Elaborazione: {label}")
 
         png_bytes = download_image(item["image_png"])
         if not png_bytes:
@@ -174,9 +176,32 @@ def process_queue_to_pdf(queue: list[dict], spacing_mm: float) -> bytes | None:
             continue
 
         try:
-            processed_png = process_image_bytes(
-                png_bytes, enhance=item.get("enhance", False)
-            )
+            if item.get("enhance", False):
+                # Pipeline cloud: cache R2 -> Replicate Real-ESRGAN -> R2.
+                cloud_png, source = enhance_card_image(
+                    item,
+                    png_bytes,
+                    notify=lambda text: progress.progress(
+                        fraction, text=f"{text} ({label})"
+                    ),
+                )
+                if cloud_png is not None:
+                    if source == "cache":
+                        st.info(f"⚡ {label}: recuperata dalla cache R2.")
+                    else:
+                        st.info(f"✨ {label}: upscalata con Replicate.")
+                    # Solo ricampionamento finale a 600 DPI: l'upscale AI
+                    # è già stato applicato dalla pipeline cloud.
+                    processed_png = process_image_bytes(cloud_png, enhance=False)
+                else:
+                    # Fallback locale (FSRCNN) se cloud non configurato o KO.
+                    progress.progress(
+                        fraction,
+                        text=f"Miglioramento locale (FSRCNN): {label}",
+                    )
+                    processed_png = process_image_bytes(png_bytes, enhance=True)
+            else:
+                processed_png = process_image_bytes(png_bytes, enhance=False)
         except Exception:
             st.error(f"Elaborazione fallita per {label}: carta saltata.")
             continue

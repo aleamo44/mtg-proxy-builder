@@ -3,3 +3,5 @@ requests
 Pillow
 opencv-contrib-python-headless
 numpy
+boto3
+replicate
