@@ -162,6 +162,19 @@ def autocomplete(query: str) -> list[str]:
     return []
 
 
+def _best_image_url(image_uris: dict) -> str | None:
+    """Restituisce l'URL dell'immagine alla massima risoluzione disponibile.
+
+    Fallback dinamico in cascata: prova prima ``png``, se assente/None passa
+    a ``large`` e infine ripiega su ``normal``.
+    """
+    for size in ("png", "large", "normal"):
+        url = image_uris.get(size)
+        if url:
+            return url
+    return None
+
+
 def _extract_printing(card: dict) -> dict:
     """Converte un oggetto carta Scryfall nel dizionario di stampa richiesto."""
     card_faces = card.get("card_faces") or []
@@ -183,7 +196,7 @@ def _extract_printing(card: dict) -> dict:
         "set_name": card.get("set_name", ""),
         "collector_number": card.get("collector_number", ""),
         "lang": card.get("lang", ""),
-        "image_png": image_uris.get("png"),
+        "image_png": _best_image_url(image_uris),
         "image_normal": image_uris.get("normal"),
         "is_dfc": is_dfc,
     }
