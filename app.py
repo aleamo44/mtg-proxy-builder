@@ -6,19 +6,18 @@ e costruire una coda di stampa. Per le carte a doppio lato (DFC) viene
 scaricata ed elaborata solo la faccia frontale.
 
 Il pulsante "Elabora Carte per la Stampa" scarica i PNG da Scryfall,
-li ricampiona a 600 DPI (2835x3960 px) e genera un file ZIP scaricabile.
+li ricampiona a 600 DPI e li impagina in un PDF A4 (griglia 3x3 centrata,
+spaziatura configurabile) pronto per il download e la stampa.
 
 Avvio: ``streamlit run app.py``
 """
 
 import json
-import re
-import zipfile
-from io import BytesIO
 
 import streamlit as st
 
 from image_processor import process_image_bytes
+from pdf_generator import generate_a4_pdf
 from scryfall_api import autocomplete, download_image, get_card_printings
 
 DFC_WARNING = (
@@ -74,55 +73,58 @@ def default_lang_index(languages: list[str]) -> int:
     return 0
 
 
-def safe_filename(text: str) -> str:
-    """Converte un testo in un nome di file sicuro."""
-    return re.sub(r"[^A-Za-z0-9_-]+", "_", text).strip("_")
+def process_queue_to_pdf(queue: list[dict], spacing_mm: float) -> bytes | None:
+    """Scarica, ricampiona a 600 DPI e impagina in PDF A4 le carte in coda.
 
-
-def process_queue_to_zip(queue: list[dict]) -> bytes | None:
-    """Scarica, ricampiona a 600 DPI e comprime in ZIP le carte in coda.
-
-    Ogni copia richiesta (quantità) viene inclusa come file separato.
-    Restituisce i byte dello ZIP, oppure ``None`` se nessuna carta è stata
-    elaborata con successo.
+    Ogni copia richiesta (quantità) occupa una cella della griglia 3x3;
+    oltre le 9 carte il PDF diventa multipagina. Restituisce i byte del PDF,
+    oppure ``None`` se nessuna carta è stata elaborata con successo.
     """
-    zip_buffer = BytesIO()
-    processed_count = 0
+    processed_images: list[bytes] = []
     progress = st.progress(0.0, text="Elaborazione in corso...")
 
-    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_STORED) as archive:
-        for index, item in enumerate(queue):
-            label = f"{item['name']} [{item['set_code']} #{item['collector_number']}]"
-            progress.progress(index / len(queue), text=f"Elaborazione: {label}")
+    for index, item in enumerate(queue):
+        label = f"{item['name']} [{item['set_code']} #{item['collector_number']}]"
+        progress.progress(index / len(queue), text=f"Elaborazione: {label}")
 
-            png_bytes = download_image(item["image_png"])
-            if not png_bytes:
-                st.error(f"Download fallito per {label}: carta saltata.")
-                continue
+        png_bytes = download_image(item["image_png"])
+        if not png_bytes:
+            st.error(f"Download fallito per {label}: carta saltata.")
+            continue
 
-            try:
-                processed_png = process_image_bytes(png_bytes)
-            except Exception:
-                st.error(f"Elaborazione fallita per {label}: carta saltata.")
-                continue
+        try:
+            processed_png = process_image_bytes(png_bytes)
+        except Exception:
+            st.error(f"Elaborazione fallita per {label}: carta saltata.")
+            continue
 
-            base_name = safe_filename(
-                f"{item['name']}_{item['set_code']}_"
-                f"{item['collector_number']}_{item['lang']}"
-            )
-            for copy in range(1, item["quantity"] + 1):
-                archive.writestr(f"{index + 1:02d}_{base_name}_copy{copy}.png",
-                                 processed_png)
-            processed_count += 1
+        processed_images.extend([processed_png] * item["quantity"])
 
+    progress.progress(0.95, text="Impaginazione del PDF A4...")
+    pdf_bytes = generate_a4_pdf(processed_images, spacing_mm=spacing_mm)
     progress.progress(1.0, text="Elaborazione completata.")
-
-    if processed_count == 0:
-        return None
-    return zip_buffer.getvalue()
+    return pdf_bytes
 
 
 st.title("MTG Proxy Builder - Card Selector")
+
+# ---------------------------------------------------------------------------
+# Sidebar: impostazioni di stampa.
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.header("Impostazioni di Stampa")
+    spacing_mm = st.slider(
+        "Spaziatura tra le carte (mm)",
+        min_value=0.0,
+        max_value=10.0,
+        value=0.0,
+        step=0.5,
+        help=(
+            "Distanza tra le carte nella griglia 3x3. "
+            "La griglia viene sempre centrata sul foglio A4."
+        ),
+    )
+    st.caption("Foglio A4 (210x297mm) a 600 DPI, griglia 3x3 centrata.")
 
 col_left, col_right = st.columns([1, 1], gap="large")
 
@@ -274,13 +276,16 @@ else:
 
     action_cols = st.columns([2, 1, 1, 3])
     if action_cols[0].button("🚀 Elabora Carte per la Stampa", type="primary"):
-        zip_bytes = process_queue_to_zip(st.session_state.queue)
-        if zip_bytes is None:
+        pdf_bytes = process_queue_to_pdf(st.session_state.queue, spacing_mm)
+        if pdf_bytes is None:
             st.error("Nessuna carta elaborata: controlla gli errori qui sopra.")
-            st.session_state.pop("processed_zip", None)
+            st.session_state.pop("processed_pdf", None)
         else:
-            st.session_state.processed_zip = zip_bytes
-            st.success("Elaborazione completata: carte ricampionate a 600 DPI.")
+            st.session_state.processed_pdf = pdf_bytes
+            st.success(
+                "Elaborazione completata: PDF A4 a 600 DPI pronto "
+                f"(spaziatura {spacing_mm}mm)."
+            )
 
     action_cols[1].download_button(
         "Scarica coda (JSON)",
@@ -290,15 +295,15 @@ else:
     )
     if action_cols[2].button("Svuota coda"):
         st.session_state.queue = []
-        st.session_state.pop("processed_zip", None)
+        st.session_state.pop("processed_pdf", None)
         st.rerun()
 
-    if st.session_state.get("processed_zip"):
+    if st.session_state.get("processed_pdf"):
         st.download_button(
-            "⬇️ Scarica ZIP delle carte elaborate (600 DPI)",
-            data=st.session_state.processed_zip,
-            file_name="proxy_cards_600dpi.zip",
-            mime="application/zip",
+            "⬇️ Scarica PDF di stampa (A4, 600 DPI)",
+            data=st.session_state.processed_pdf,
+            file_name="proxy_sheet_a4_600dpi.pdf",
+            mime="application/pdf",
             type="primary",
         )
 
