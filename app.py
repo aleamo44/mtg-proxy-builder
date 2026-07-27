@@ -187,10 +187,23 @@ with col_left:
                 "Lingua",
                 options=available_langs,
                 index=default_lang_index(available_langs),
+                format_func=str.upper,
                 key=f"lang_select_{selected_name}_{selected_key}",
             )
 
             selected_printing = editions[selected_key]["by_lang"][selected_lang]
+
+            # Se l'utente cambia la selezione, l'anteprima torna a mostrare
+            # la carta selezionata invece di quella scelta dalla coda.
+            selection_signature = (
+                selected_name,
+                selected_printing["set_code"],
+                selected_printing["collector_number"],
+                selected_printing["lang"],
+            )
+            if st.session_state.get("last_selection") != selection_signature:
+                st.session_state.last_selection = selection_signature
+                st.session_state.pop("queue_preview", None)
 
             quantity = st.number_input(
                 "Quantità",
@@ -222,21 +235,22 @@ with col_left:
 with col_right:
     st.subheader("Anteprima")
 
-    if selected_printing is None:
+    # L'anteprima richiesta dalla coda ha priorità sulla selezione corrente.
+    preview = st.session_state.get("queue_preview") or selected_printing
+
+    if preview is None:
         st.caption("Cerca e seleziona una carta per vedere l'anteprima.")
-    elif selected_printing["image_normal"]:
-        if selected_printing["is_dfc"]:
+    elif preview["image_normal"]:
+        if preview["is_dfc"]:
             st.warning(DFC_WARNING)
-        st.image(
-            selected_printing["image_normal"],
-            caption=(
-                f"{selected_printing['set_name']} "
-                f"(#{selected_printing['collector_number']}) "
-                f"[{selected_printing['lang']}]"
-                + (" — solo fronte" if selected_printing["is_dfc"] else "")
-            ),
-            width=340,
+        caption = (
+            f"{preview['set_name']} (#{preview['collector_number']}) "
+            f"[{preview['lang'].upper()}]"
+            + (" — solo fronte" if preview["is_dfc"] else "")
         )
+        if preview.get("name"):
+            caption = f"{preview['name']} — {caption}"
+        st.image(preview["image_normal"], caption=caption, width=340)
     else:
         st.warning("Immagine non disponibile per questa stampa.")
 
@@ -249,20 +263,34 @@ st.subheader("Coda di Stampa")
 if not st.session_state.queue:
     st.caption("La coda è vuota. Aggiungi delle carte per iniziare.")
 else:
-    header = st.columns([3, 3, 1, 1, 1, 1])
-    for col, label in zip(header, ["Nome", "Set", "Numero", "Lingua", "Qtà", ""]):
-        col.markdown(f"**{label}**")
-
     for index, item in enumerate(st.session_state.queue):
-        row = st.columns([3, 3, 1, 1, 1, 1])
-        row[0].write(("⚠️ " if item["is_dfc"] else "") + item["name"])
-        row[1].write(item["set_name"])
-        row[2].write(f"#{item['collector_number']}")
-        row[3].write(item["lang"])
-        row[4].write(str(item["quantity"]))
-        if row[5].button("🗑️", key=f"remove_{index}", help="Rimuovi dalla coda"):
-            st.session_state.queue.pop(index)
-            st.rerun()
+        marker = "⚠️ " if item["is_dfc"] else ""
+        with st.expander(f"{marker}{item['name']} (x{item['quantity']})"):
+            st.markdown(
+                f"- **Nome:** {item['name']}\n"
+                f"- **Set:** {item['set_name']}\n"
+                f"- **Numero:** #{item['collector_number']}\n"
+                f"- **Lingua:** {item['lang'].upper()}\n"
+                f"- **Qtà:** {item['quantity']}"
+            )
+            if item["is_dfc"]:
+                st.warning(DFC_WARNING)
+
+            btn_cols = st.columns([1, 1, 4])
+            if btn_cols[0].button(
+                "👁️ Anteprima",
+                key=f"preview_{index}",
+                help="Mostra questa carta nel riquadro dell'anteprima",
+            ):
+                st.session_state.queue_preview = item
+                st.rerun()
+            if btn_cols[1].button(
+                "🗑️", key=f"remove_{index}", help="Rimuovi dalla coda"
+            ):
+                removed = st.session_state.queue.pop(index)
+                if st.session_state.get("queue_preview") is removed:
+                    st.session_state.pop("queue_preview", None)
+                st.rerun()
 
     total_cards = sum(item["quantity"] for item in st.session_state.queue)
     st.caption(
