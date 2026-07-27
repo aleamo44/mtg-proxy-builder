@@ -108,24 +108,6 @@ def process_queue_to_pdf(queue: list[dict], spacing_mm: float) -> bytes | None:
 
 st.title("MTG Proxy Builder - Card Selector")
 
-# ---------------------------------------------------------------------------
-# Sidebar: impostazioni di stampa.
-# ---------------------------------------------------------------------------
-with st.sidebar:
-    st.header("Impostazioni di Stampa")
-    spacing_mm = st.slider(
-        "Spaziatura tra le carte (mm)",
-        min_value=0.0,
-        max_value=10.0,
-        value=0.0,
-        step=0.5,
-        help=(
-            "Distanza tra le carte nella griglia 3x3. "
-            "La griglia viene sempre centrata sul foglio A4."
-        ),
-    )
-    st.caption("Foglio A4 (210x297mm) a 600 DPI, griglia 3x3 centrata.")
-
 col_left, col_right = st.columns([1, 1], gap="large")
 
 selected_printing: dict | None = None
@@ -302,8 +284,33 @@ else:
 
     queue_json = json.dumps(st.session_state.queue, indent=2, ensure_ascii=False)
 
-    action_cols = st.columns([2, 1, 1, 3])
-    if action_cols[0].button("🚀 Elabora Carte per la Stampa", type="primary"):
+    action_cols = st.columns([1, 1, 4])
+    action_cols[0].download_button(
+        "Scarica coda (JSON)",
+        data=queue_json,
+        file_name="print_queue.json",
+        mime="application/json",
+    )
+    if action_cols[1].button("Svuota coda"):
+        st.session_state.queue = []
+        st.session_state.pop("processed_pdf", None)
+        st.rerun()
+
+    # -----------------------------------------------------------------------
+    # Impostazioni di stampa e generazione del PDF.
+    # -----------------------------------------------------------------------
+    st.subheader("Impostazioni di Stampa")
+
+    spacing_mm = st.slider(
+        "Spaziatura tra le carte (mm)",
+        min_value=0.0,
+        max_value=10.0,
+        value=0.0,
+        step=0.5,
+        help="Imposta lo spazio uniforme (X e Y) tra le carte sul foglio A4.",
+    )
+
+    if st.button("🚀 Genera PDF A4 per la Stampa", type="primary"):
         pdf_bytes = process_queue_to_pdf(st.session_state.queue, spacing_mm)
         if pdf_bytes is None:
             st.error("Nessuna carta elaborata: controlla gli errori qui sopra.")
@@ -314,17 +321,6 @@ else:
                 "Elaborazione completata: PDF A4 a 600 DPI pronto "
                 f"(spaziatura {spacing_mm}mm)."
             )
-
-    action_cols[1].download_button(
-        "Scarica coda (JSON)",
-        data=queue_json,
-        file_name="print_queue.json",
-        mime="application/json",
-    )
-    if action_cols[2].button("Svuota coda"):
-        st.session_state.queue = []
-        st.session_state.pop("processed_pdf", None)
-        st.rerun()
 
     if st.session_state.get("processed_pdf"):
         st.download_button(
