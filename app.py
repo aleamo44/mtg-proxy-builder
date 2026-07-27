@@ -14,6 +14,8 @@ Avvio: ``streamlit run app.py``
 
 import hmac
 import json
+import time
+import uuid
 
 import streamlit as st
 
@@ -133,17 +135,24 @@ if "queue" not in st.session_state:
     st.session_state.queue = []
 
 
-def add_to_queue(entry: dict) -> None:
-    """Aggiunge una carta alla coda, sommando le quantità se già presente."""
-    for item in st.session_state.queue:
-        if (
-            item["name"] == entry["name"]
-            and item["set_code"] == entry["set_code"]
-            and item["collector_number"] == entry["collector_number"]
-            and item["lang"] == entry["lang"]
-        ):
-            item["quantity"] = min(4, item["quantity"] + entry["quantity"])
-            return
+def add_to_queue(entry: dict, merge: bool = True) -> None:
+    """Aggiunge una carta alla coda di stampa.
+
+    Con ``merge=True`` le carte identiche vengono accorpate sommando le
+    quantità; con ``merge=False`` ogni aggiunta crea una voce separata
+    (utile per confrontare parametri diversi, es. con e senza upscale).
+    """
+    if merge:
+        for item in st.session_state.queue:
+            if (
+                item["name"] == entry["name"]
+                and item["set_code"] == entry["set_code"]
+                and item["collector_number"] == entry["collector_number"]
+                and item["lang"] == entry["lang"]
+            ):
+                item["quantity"] = min(4, item["quantity"] + entry["quantity"])
+                return
+    entry["uid"] = uuid.uuid4().hex[:8]
     st.session_state.queue.append(entry)
 
 
@@ -159,21 +168,44 @@ def process_queue_to_pdf(queue: list[dict], spacing_mm: float) -> bytes | None:
     """Scarica, ricampiona a 600 DPI e impagina in PDF A4 le carte in coda.
 
     Ogni copia richiesta (quantità) occupa una cella della griglia 3x3;
-    oltre le 9 carte il PDF diventa multipagina. Restituisce i byte del PDF,
+    oltre le 9 carte il PDF diventa multipagina. Ogni step della pipeline
+    (cache R2, Replicate, fallback locale) viene tracciato nel log di
+    diagnostica visibile nell'interfaccia. Restituisce i byte del PDF,
     oppure ``None`` se nessuna carta è stata elaborata con successo.
     """
     processed_images: list[bytes] = []
     progress = st.progress(0.0, text="Elaborazione in corso...")
 
+    log_lines: list[str] = []
+    log_container = st.expander(
+        "🛠️ Log e Diagnostica Processo", expanded=False
+    ).container()
+
+    def log(message: str) -> None:
+        line = f"{time.strftime('%H:%M:%S')} — {message}"
+        log_lines.append(line)
+        log_container.write(line)
+
+    log(
+        f"Avvio elaborazione: {len(queue)} voci in coda, "
+        f"spaziatura {spacing_mm}mm."
+    )
+
     for index, item in enumerate(queue):
         label = f"{item['name']} [{item['set_code']} #{item['collector_number']}]"
         fraction = index / len(queue)
         progress.progress(fraction, text=f"Elaborazione: {label}")
+        log(
+            f"▶️ {label} x{item['quantity']} — Miglioramento Avanzato: "
+            f"{'ON' if item.get('enhance', False) else 'OFF'}."
+        )
 
         png_bytes = download_image(item["image_png"])
         if not png_bytes:
+            log(f"❌ Download da Scryfall fallito per {label}: carta saltata.")
             st.error(f"Download fallito per {label}: carta saltata.")
             continue
+        log(f"⬇️ Sorgente Scryfall scaricata ({len(png_bytes) // 1024} KB).")
 
         try:
             if item.get("enhance", False):
@@ -184,6 +216,7 @@ def process_queue_to_pdf(queue: list[dict], spacing_mm: float) -> bytes | None:
                     notify=lambda text: progress.progress(
                         fraction, text=f"{text} ({label})"
                     ),
+                    log=log,
                 )
                 if cloud_png is not None:
                     if source == "cache":
@@ -195,6 +228,7 @@ def process_queue_to_pdf(queue: list[dict], spacing_mm: float) -> bytes | None:
                     processed_png = process_image_bytes(cloud_png, enhance=False)
                 else:
                     # Fallback locale (FSRCNN) se cloud non configurato o KO.
+                    log(f"↩️ Fallback locale FSRCNN attivato — causa: {source}.")
                     progress.progress(
                         fraction,
                         text=f"Miglioramento locale (FSRCNN): {label}",
@@ -202,15 +236,20 @@ def process_queue_to_pdf(queue: list[dict], spacing_mm: float) -> bytes | None:
                     processed_png = process_image_bytes(png_bytes, enhance=True)
             else:
                 processed_png = process_image_bytes(png_bytes, enhance=False)
-        except Exception:
+        except Exception as exc:
+            log(f"❌ Elaborazione fallita per {label}: {exc!r} — carta saltata.")
             st.error(f"Elaborazione fallita per {label}: carta saltata.")
             continue
 
+        log(f"✅ {label}: pronta a 600 DPI (2835x3960 px).")
         processed_images.extend([processed_png] * item["quantity"])
 
     progress.progress(0.95, text="Impaginazione del PDF A4...")
+    log(f"📄 Impaginazione PDF A4: {len(processed_images)} carte totali.")
     pdf_bytes = generate_a4_pdf(processed_images, spacing_mm=spacing_mm)
     progress.progress(1.0, text="Elaborazione completata.")
+    log("🏁 Elaborazione completata." if pdf_bytes else "🏁 Nessuna carta elaborata.")
+    st.session_state.process_log = log_lines
     return pdf_bytes
 
 
@@ -320,6 +359,7 @@ with col_left:
                 step=1,
             )
 
+            merge_duplicates = st.session_state.get("merge_duplicates", True)
             if st.button("Aggiungi alla Coda di Stampa", type="primary"):
                 # Default del miglioramento avanzato: ON solo per le scansioni
                 # a bassa risoluzione mantenute in lingua non inglese; OFF per
@@ -342,7 +382,8 @@ with col_left:
                         "is_dfc": selected_printing["is_dfc"],
                         "is_low_res": selected_printing["is_low_res"],
                         "enhance": default_enhance,
-                    }
+                    },
+                    merge=merge_duplicates,
                 )
                 st.success(f"Aggiunto: {selected_name} x{int(quantity)}")
 
@@ -398,16 +439,13 @@ else:
             if item["is_dfc"]:
                 st.warning(DFC_WARNING)
 
-            # Chiave legata all'identità della carta (non all'indice), così lo
-            # stato del checkbox non scivola su un'altra voce dopo una rimozione.
-            item_key = (
-                f"{item['name']}_{item['set_code']}_"
-                f"{item['collector_number']}_{item['lang']}"
-            )
+            # Chiave legata all'uid univoco della voce: non scivola su altre
+            # voci dopo una rimozione e resta unica anche con carte duplicate
+            # (accorpamento disattivato).
             item["enhance"] = st.checkbox(
                 "✨ Miglioramento Avanzato (Denoise & Sharpening)",
                 value=item.get("enhance", False),
-                key=f"enhance_{item_key}",
+                key=f"enhance_{item.get('uid', index)}",
             )
 
             btn_cols = st.columns([1, 1, 4])
@@ -453,6 +491,18 @@ else:
     # -----------------------------------------------------------------------
     st.subheader("Impostazioni di Stampa")
 
+    st.checkbox(
+        "Accorpa carte identiche nella coda",
+        value=True,
+        key="merge_duplicates",
+        help=(
+            "Se attivo, aggiungere una carta già in coda ne incrementa la "
+            "quantità. Se disattivo, ogni aggiunta crea una voce separata "
+            "(utile per confrontare parametri diversi, es. con e senza "
+            "Miglioramento Avanzato)."
+        ),
+    )
+
     spacing_mm = st.slider(
         "Spaziatura tra le carte (mm)",
         min_value=0.0,
@@ -462,7 +512,8 @@ else:
         help="Imposta lo spazio uniforme (X e Y) tra le carte sul foglio A4.",
     )
 
-    if st.button("🚀 Genera PDF A4 per la Stampa", type="primary"):
+    generate_clicked = st.button("🚀 Genera PDF A4 per la Stampa", type="primary")
+    if generate_clicked:
         pdf_bytes = process_queue_to_pdf(st.session_state.queue, spacing_mm)
         if pdf_bytes is None:
             st.error("Nessuna carta elaborata: controlla gli errori qui sopra.")
@@ -473,6 +524,11 @@ else:
                 "Elaborazione completata: PDF A4 a 600 DPI pronto "
                 f"(spaziatura {spacing_mm}mm)."
             )
+    elif st.session_state.get("process_log"):
+        # Log dell'ultima elaborazione, persistente tra i rerun.
+        with st.expander("🛠️ Log e Diagnostica Processo"):
+            for line in st.session_state.process_log:
+                st.write(line)
 
     if st.session_state.get("processed_pdf"):
         st.download_button(

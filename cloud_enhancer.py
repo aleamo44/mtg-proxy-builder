@@ -18,6 +18,7 @@ miglioramento locale (FSRCNN).
 from __future__ import annotations
 
 import re
+import time
 from io import BytesIO
 from typing import Callable
 
@@ -26,6 +27,7 @@ import replicate
 import requests
 import streamlit as st
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 DEFAULT_BUCKET = "magic-proxy-cache"
 REAL_ESRGAN_MODEL = "nightmareai/real-esrgan"
@@ -92,28 +94,44 @@ def make_cache_key(item: dict) -> str:
     )
 
 
-def get_cached_image(client, bucket: str, key: str) -> bytes | None:
-    """Scarica l'immagine dalla cache R2; ``None`` se assente o su errore."""
+def get_cached_image(
+    client, bucket: str, key: str
+) -> tuple[bytes | None, str | None]:
+    """Scarica l'immagine dalla cache R2.
+
+    Restituisce ``(dati, None)`` in caso di HIT, ``(None, None)`` in caso di
+    MISS (chiave assente) e ``(None, errore)`` per errori di rete/credenziali.
+    """
     try:
         response = client.get_object(Bucket=bucket, Key=key)
-        return response["Body"].read()
-    except Exception:
-        return None
+        return response["Body"].read(), None
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("NoSuchKey", "404", "NotFound"):
+            return None, None
+        return None, f"{code or 'ClientError'}: {exc}"
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
 
 
-def put_cached_image(client, bucket: str, key: str, data: bytes) -> bool:
-    """Salva l'immagine nella cache R2 (best effort)."""
+def put_cached_image(client, bucket: str, key: str, data: bytes) -> str | None:
+    """Salva l'immagine nella cache R2; restituisce l'errore o ``None``."""
     try:
         client.put_object(
             Bucket=bucket, Key=key, Body=data, ContentType="image/png"
         )
-        return True
-    except Exception:
-        return False
+        return None
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
 
 
-def upscale_with_replicate(png_bytes: bytes, api_token: str) -> bytes | None:
-    """Upscaling Real-ESRGAN via Replicate; ``None`` in caso di errore."""
+def upscale_with_replicate(
+    png_bytes: bytes, api_token: str
+) -> tuple[bytes | None, str | None]:
+    """Upscaling Real-ESRGAN via Replicate.
+
+    Restituisce ``(immagine, None)`` oppure ``(None, errore dettagliato)``.
+    """
     try:
         client = replicate.Client(api_token=api_token)
         source = BytesIO(png_bytes)
@@ -127,51 +145,82 @@ def upscale_with_replicate(png_bytes: bytes, api_token: str) -> bytes | None:
             },
         )
         if hasattr(output, "read"):
-            return output.read()
+            return output.read(), None
         response = requests.get(str(output), timeout=DOWNLOAD_TIMEOUT_SECONDS)
         response.raise_for_status()
-        return response.content
-    except Exception:
-        return None
+        return response.content, None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
 
 
 def enhance_card_image(
     item: dict,
     png_bytes: bytes,
     notify: Callable[[str], None] = lambda message: None,
+    log: Callable[[str], None] = lambda message: None,
 ) -> tuple[bytes | None, str]:
     """Pipeline cloud completa: cache R2 → Replicate → salvataggio in cache.
 
+    Ogni passo (controllo cache HIT/MISS, chiamata Replicate con esito e
+    tempo, salvataggio su R2) viene riportato tramite ``log``; gli errori
+    non vengono mai nascosti.
+
     Restituisce ``(immagine, sorgente)`` dove sorgente è ``"cache"`` o
-    ``"replicate"``; ``(None, motivo)`` se la pipeline cloud non è
+    ``"replicate"``; ``(None, causa)`` se la pipeline cloud non è
     disponibile o fallisce (il chiamante può ripiegare sul locale).
     """
     r2_config = get_r2_config()
     cache_key = make_cache_key(item)
+    log(f"🔑 Chiave cache: {cache_key}")
 
     r2_client = None
-    if r2_config is not None:
+    if r2_config is None:
+        log("ℹ️ R2 non configurato nei secrets: cache cloud disattivata.")
+    else:
         try:
             r2_client = get_r2_client(r2_config)
-        except Exception:
-            r2_client = None
+        except Exception as exc:
+            log(f"❌ Inizializzazione client R2 fallita: {exc}")
 
     if r2_client is not None:
         notify("⚡ Recupero immagine da Cloudflare R2...")
-        cached = get_cached_image(r2_client, r2_config["bucket"], cache_key)
+        log("⚡ Controllo cache R2 in corso...")
+        cached, cache_error = get_cached_image(
+            r2_client, r2_config["bucket"], cache_key
+        )
         if cached:
+            log(f"✅ Cache R2: HIT ({len(cached) // 1024} KB scaricati).")
             return cached, "cache"
+        if cache_error:
+            log(f"❌ Errore lettura cache R2: {cache_error}")
+        else:
+            log("ℹ️ Cache R2: MISS, immagine non ancora presente.")
 
     api_token = get_replicate_token()
     if api_token is None:
-        return None, "replicate non configurato"
+        log("ℹ️ Token Replicate non configurato nei secrets.")
+        return None, "Replicate non configurato"
 
     notify("✨ Upscaling AI in corso con Replicate...")
-    upscaled = upscale_with_replicate(png_bytes, api_token)
+    log(f"✨ Chiamata Replicate ({REAL_ESRGAN_MODEL}, x{UPSCALE_FACTOR})...")
+    started = time.monotonic()
+    upscaled, replicate_error = upscale_with_replicate(png_bytes, api_token)
+    elapsed = time.monotonic() - started
     if upscaled is None:
-        return None, "errore Replicate"
+        log(f"❌ Replicate fallito dopo {elapsed:.1f}s: {replicate_error}")
+        return None, f"errore Replicate: {replicate_error}"
+    log(
+        f"✅ Replicate completato in {elapsed:.1f}s "
+        f"({len(upscaled) // 1024} KB ricevuti)."
+    )
 
     if r2_client is not None:
-        put_cached_image(r2_client, r2_config["bucket"], cache_key, upscaled)
+        put_error = put_cached_image(
+            r2_client, r2_config["bucket"], cache_key, upscaled
+        )
+        if put_error:
+            log(f"❌ Salvataggio su R2 fallito: {put_error}")
+        else:
+            log(f"💾 Immagine salvata su R2 ({cache_key}).")
 
     return upscaled, "replicate"
