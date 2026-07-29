@@ -62,8 +62,16 @@ def get_r2_config() -> dict | None:
     secret_access_key = str(section.get("secret_access_key", "")).strip()
     if not (account_id and access_key_id and secret_access_key):
         return None
+
+    # Accetta sia il solo account_id sia un endpoint completo già formato;
+    # rimuove eventuali slash finali per una sintassi sempre valida.
+    if account_id.startswith(("http://", "https://")):
+        endpoint_url = account_id.rstrip("/")
+    else:
+        endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
+
     return {
-        "endpoint_url": f"https://{account_id}.r2.cloudflarestorage.com",
+        "endpoint_url": endpoint_url,
         "access_key_id": access_key_id,
         "secret_access_key": secret_access_key,
         "bucket": str(section.get("bucket", DEFAULT_BUCKET)).strip()
@@ -72,12 +80,18 @@ def get_r2_config() -> dict | None:
 
 
 def get_r2_client(config: dict):
-    """Client S3 (boto3) configurato per Cloudflare R2."""
+    """Client S3 (boto3) configurato per Cloudflare R2.
+
+    ``region_name="auto"`` è richiesto da botocore per gli endpoint R2:
+    senza regione la firma s3v4 non può essere calcolata e l'inizializzazione
+    fallisce con "Invalid endpoint".
+    """
     return boto3.client(
         "s3",
         endpoint_url=config["endpoint_url"],
         aws_access_key_id=config["access_key_id"],
         aws_secret_access_key=config["secret_access_key"],
+        region_name="auto",
         config=Config(
             signature_version="s3v4",
             retries={"max_attempts": 2, "mode": "standard"},
