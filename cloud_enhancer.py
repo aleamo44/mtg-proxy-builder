@@ -52,25 +52,38 @@ def get_replicate_token() -> str | None:
     return token or None
 
 
+def build_endpoint_url(raw_value: str) -> str:
+    """Normalizza l'endpoint R2 a partire dal valore nei secrets.
+
+    Accetta l'URL completo (con o senza schema) oppure il solo account ID
+    (stringa senza punti): in quel caso costruisce
+    ``https://<account_id>.r2.cloudflarestorage.com``.
+    """
+    value = raw_value.strip().rstrip("/")
+    if value.startswith("http"):
+        return value
+    if "." not in value:
+        return f"https://{value}.r2.cloudflarestorage.com"
+    return f"https://{value}"
+
+
 def get_r2_config() -> dict | None:
     """Configurazione R2 da ``st.secrets["r2"]`` (None se incompleta)."""
     section = _get_secret_section("r2")
     if not section:
         return None
-    # La chiave account_id contiene l'URL completo dell'endpoint fornito da
-    # Cloudflare (es. https://<account_id>.r2.cloudflarestorage.com), usato
-    # così com'è: si rimuovono solo spazi e slash finali di troppo e si
-    # antepone https:// se lo schema manca.
-    endpoint_url = str(
+    # La chiave account_id accetta sia l'URL completo dell'endpoint fornito
+    # da Cloudflare (es. https://<account_id>.r2.cloudflarestorage.com) sia
+    # l'account ID "secco": in quel caso il dominio viene aggiunto.
+    raw_value = str(
         section.get("account_id") or section.get("endpoint") or ""
     ).strip().rstrip("/")
     access_key_id = str(section.get("access_key_id", "")).strip()
     secret_access_key = str(section.get("secret_access_key", "")).strip()
-    if not (endpoint_url and access_key_id and secret_access_key):
+    if not (raw_value and access_key_id and secret_access_key):
         return None
 
-    if not endpoint_url.startswith("http"):
-        endpoint_url = f"https://{endpoint_url}"
+    endpoint_url = build_endpoint_url(raw_value)
 
     return {
         "endpoint_url": endpoint_url,
