@@ -57,18 +57,20 @@ def get_r2_config() -> dict | None:
     section = _get_secret_section("r2")
     if not section:
         return None
-    account_id = str(section.get("account_id", "")).strip()
+    # La chiave account_id contiene l'URL completo dell'endpoint fornito da
+    # Cloudflare (es. https://<account_id>.r2.cloudflarestorage.com), usato
+    # così com'è: si rimuovono solo spazi e slash finali di troppo e si
+    # antepone https:// se lo schema manca.
+    endpoint_url = str(
+        section.get("account_id") or section.get("endpoint") or ""
+    ).strip().rstrip("/")
     access_key_id = str(section.get("access_key_id", "")).strip()
     secret_access_key = str(section.get("secret_access_key", "")).strip()
-    if not (account_id and access_key_id and secret_access_key):
+    if not (endpoint_url and access_key_id and secret_access_key):
         return None
 
-    # Accetta sia il solo account_id sia un endpoint completo già formato;
-    # rimuove eventuali slash finali per una sintassi sempre valida.
-    if account_id.startswith(("http://", "https://")):
-        endpoint_url = account_id.rstrip("/")
-    else:
-        endpoint_url = f"https://{account_id}.r2.cloudflarestorage.com"
+    if not endpoint_url.startswith("http"):
+        endpoint_url = f"https://{endpoint_url}"
 
     return {
         "endpoint_url": endpoint_url,
@@ -82,18 +84,19 @@ def get_r2_config() -> dict | None:
 def get_r2_client(config: dict):
     """Client S3 (boto3) configurato per Cloudflare R2.
 
-    ``region_name="auto"`` è richiesto da botocore per gli endpoint R2:
-    senza regione la firma s3v4 non può essere calcolata e l'inizializzazione
-    fallisce con "Invalid endpoint".
+    ``region_name="auto"`` e ``addressing_style: path`` sono fondamentali
+    per la compatibilità con gli endpoint R2 ed evitano l'errore
+    "Invalid endpoint" durante l'inizializzazione.
     """
     return boto3.client(
-        "s3",
+        service_name="s3",
         endpoint_url=config["endpoint_url"],
         aws_access_key_id=config["access_key_id"],
         aws_secret_access_key=config["secret_access_key"],
         region_name="auto",
         config=Config(
             signature_version="s3v4",
+            s3={"addressing_style": "path"},
             retries={"max_attempts": 2, "mode": "standard"},
         ),
     )
