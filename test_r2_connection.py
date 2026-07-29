@@ -6,9 +6,14 @@ hardcoded — e prova a elencare il contenuto del bucket usando la stessa
 identica configurazione del client impiegata dall'app (region 'auto',
 firma s3v4, addressing path-style).
 
+In alternativa al file secrets.toml, le credenziali possono essere fornite
+tramite le variabili d'ambiente R2_ACCOUNT_ID, R2_ACCESS_KEY_ID,
+R2_SECRET_ACCESS_KEY e (opzionale) R2_BUCKET.
+
 Uso: python3 test_r2_connection.py
 """
 
+import os
 import sys
 import tomllib
 from pathlib import Path
@@ -21,27 +26,45 @@ from cloud_enhancer import DEFAULT_BUCKET, build_endpoint_url
 SECRETS_PATH = Path(__file__).parent / ".streamlit" / "secrets.toml"
 
 
+def _load_r2_credentials() -> dict:
+    """Credenziali dalla sezione [r2] dei secrets o dalle variabili d'ambiente."""
+    r2: dict = {}
+    if SECRETS_PATH.is_file():
+        with open(SECRETS_PATH, "rb") as handle:
+            r2 = tomllib.load(handle).get("r2", {})
+        print(f"Credenziali lette da {SECRETS_PATH}")
+    elif os.environ.get("R2_ACCESS_KEY_ID"):
+        r2 = {
+            "account_id": os.environ.get("R2_ACCOUNT_ID", ""),
+            "access_key_id": os.environ.get("R2_ACCESS_KEY_ID", ""),
+            "secret_access_key": os.environ.get("R2_SECRET_ACCESS_KEY", ""),
+            "bucket": os.environ.get("R2_BUCKET", DEFAULT_BUCKET),
+        }
+        print("Credenziali lette dalle variabili d'ambiente R2_*")
+    return r2
+
+
 def main() -> int:
-    if not SECRETS_PATH.is_file():
-        print(f"❌ File {SECRETS_PATH} non trovato.")
-        print("   Crealo partendo da .streamlit/secrets.toml.example e")
-        print("   compila la sezione [r2].")
-        return 1
-
-    with open(SECRETS_PATH, "rb") as handle:
-        secrets = tomllib.load(handle)
-
-    r2 = secrets.get("r2", {})
+    r2 = _load_r2_credentials()
     raw_endpoint = str(r2.get("account_id") or r2.get("endpoint") or "").strip()
     access_key = str(r2.get("access_key_id", "")).strip()
     secret_key = str(r2.get("secret_access_key", "")).strip()
     bucket = str(r2.get("bucket", DEFAULT_BUCKET)).strip() or DEFAULT_BUCKET
 
     if not (raw_endpoint and access_key and secret_key):
-        print("❌ Sezione [r2] incompleta nei secrets: servono account_id")
-        print("   (URL endpoint o account ID), access_key_id e")
-        print("   secret_access_key.")
+        print("❌ Credenziali R2 non trovate o incomplete.")
+        print(f"   Opzione 1: crea {SECRETS_PATH} partendo da")
+        print("   .streamlit/secrets.toml.example e compila la sezione [r2].")
+        print("   Opzione 2: imposta le variabili d'ambiente R2_ACCOUNT_ID,")
+        print("   R2_ACCESS_KEY_ID e R2_SECRET_ACCESS_KEY.")
         return 1
+
+    if len(access_key) != 32:
+        print(
+            f"⚠️ Attenzione: l'Access Key ID è lungo {len(access_key)} "
+            "caratteri, ma R2 si aspetta 32. Probabilmente hai copiato il "
+            "valore sbagliato (es. un API Token invece della chiave S3)."
+        )
 
     endpoint_url = build_endpoint_url(raw_endpoint)
     print(f"Testing endpoint: {endpoint_url}")
